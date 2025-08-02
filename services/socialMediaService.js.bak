@@ -1,0 +1,723 @@
+const axios = require('axios');
+const AppError = require('../utils/appError');
+const Message = require('../models/messageModel');
+const Post = require('../models/postModel');
+const Comment = require('../models/commentModel');
+const Product = require('../models/productModel');
+
+// استيراد مكتبات المنصات
+const { FacebookApi } = require('fb');
+const TikTokApi = require('tiktok-node-api');
+
+// تكوين فيسبوك
+const fb = new FacebookApi({
+  appId: process.env.FB_APP_ID,
+  appSecret: process.env.FB_APP_SECRET,
+  version: 'v12.0'
+});
+
+class SocialMediaService {
+  constructor(user) {
+    this.user = user;
+    this.platformServices = {
+      facebook: this._publishToFacebook.bind(this),
+      instagram: this._publishToInstagram.bind(this),
+      tiktok: this._publishToTikTok.bind(this),
+      x: this._publishToTwitter.bind(this)
+    };
+  }
+
+  // Publish post to multiple platforms
+  async publishPost(post) {
+    const results = [];
+    
+    for (const platform of post.platforms) {
+      try {
+        const platformService = this.platformServices[platform.name];
+        if (platformService) {
+          const result = await platformService(post, platform);
+          results.push({
+            platform: platform.name,
+            success: true,
+            data: result
+          });
+          
+          // Update platform status
+          platform.status = 'published';
+          platform.postId = result.id;
+          platform.url = result.url;
+        }
+      } catch (error) {
+        console.error(`Error publishing to ${platform.name}:`, error);
+        results.push({
+          platform: platform.name,
+          success: false,
+          error: error.message
+        });
+        
+        // Update platform status
+        platform.status = 'failed';
+        platform.error = error.message;
+      }
+    }
+    
+    return results;
+  }
+
+  // Update post on multiple platforms
+  async updatePost(post) {
+    const results = [];
+    
+    for (const platform of post.platforms) {
+      try {
+        if (platform.status === 'published' && platform.postId) {
+          const platformService = this.platformServices[platform.name];
+          if (platformService) {
+            const result = await this._updateOnPlatform(platform.name, platform.postId, post);
+            results.push({
+              platform: platform.name,
+              success: true,
+              data: result
+            });
+          }
+        }
+      } catch (error) {
+        console.error(`Error updating on ${platform.name}:`, error);
+        results.push({
+          platform: platform.name,
+          success: false,
+          error: error.message
+        });
+      }
+    }
+    
+    return results;
+  }
+
+  // Delete post from multiple platforms
+  async deletePost(post) {
+    const results = [];
+    
+    for (const platform of post.platforms) {
+      try {
+        if (platform.status === 'published' && platform.postId) {
+          const result = await this._deleteFromPlatform(platform.name, platform.postId);
+          results.push({
+            platform: platform.name,
+            success: true,
+            data: result
+          });
+        }
+      } catch (error) {
+        console.error(`Error deleting from ${platform.name}:`, error);
+        results.push({
+          platform: platform.name,
+          success: false,
+          error: error.message
+        });
+      }
+    }
+    
+    return results;
+  }
+
+  // Get post analytics from multiple platforms
+  async getPostAnalytics(post) {
+    const results = [];
+    
+    for (const platform of post.platforms) {
+      try {
+        if (platform.status === 'published' && platform.postId) {
+          const analytics = await this._getAnalyticsFromPlatform(platform.name, platform.postId);
+          results.push({
+            platform: platform.name,
+            success: true,
+            data: analytics
+          });
+        }
+      } catch (error) {
+        console.error(`Error getting analytics from ${platform.name}:`, error);
+        results.push({
+          platform: platform.name,
+          success: false,
+          error: error.message
+        });
+      }
+    }
+    
+    return results;
+  }
+
+  // Message handling methods
+  async sendDirectMessage(platform, recipientId, message, imageUrl = null) {
+    const accessToken = this._getAccessToken(platform);
+    
+    switch (platform) {
+      case 'facebook':
+        return this._sendFacebookMessage(accessToken, recipientId, message, imageUrl);
+      case 'instagram':
+        return this._sendInstagramMessage(accessToken, recipientId, message, imageUrl);
+      default:
+        throw new Error('Platform not supported for direct messages');
+    }
+  }
+
+  async syncMessages(platform) {
+    const accessToken = this._getAccessToken(platform);
+    let messages = [];
+    
+    switch (platform) {
+      case 'facebook':
+        messages = await this._syncFacebookMessages(accessToken);
+        break;
+      case 'instagram':
+        messages = await this._syncInstagramMessages(accessToken);
+        break;
+      default:
+        throw new Error('Message sync not supported for this platform');
+    }
+    
+    // Save messages to database
+    const savedMessages = await Message.insertMany(messages);
+    return savedMessages;
+  }
+
+  // Private methods for each platform
+  async _sendFacebookMessage(accessToken, recipientId, message, imageUrl) {
+    // Implement Facebook message sending logic
+    // This is a simplified example
+    const response = await axios.post(
+      `https://graph.facebook.com/v12.0/me/messages?access_token=${accessToken}`,
+      {
+        recipient: { id: recipientId },
+        message: {
+          text: message,
+          // Add attachment if imageUrl is provided
+          ...(imageUrl && {
+            attachment: {
+              type: 'image',
+              payload: { url: imageUrl, is_reusable: true }
+            }
+          })
+        }
+      }
+    );
+    
+    return {
+      id: response.data.message_id,
+      platform: 'facebook',
+      timestamp: new Date()
+    };
+  }
+
+  async _syncFacebookMessages(accessToken) {
+    // Implement Facebook message syncing logic
+    // This is a simplified example
+    const response = await axios.get(
+      `https://graph.facebook.com/v12.0/me/conversations?fields=messages.limit(50){message,from,created_time}&access_token=${accessToken}`
+    );
+    
+    // Process and return messages
+    return response.data.data.flatMap(conv => 
+      conv.messages.data.map(msg => ({
+        user: this.user._id,
+        platform: 'facebook',
+        threadId: conv.id,
+        recipientId: msg.from.id,
+        recipientName: msg.from.name,
+        content: msg.message,
+        direction: msg.from.id === this.user.socialMediaAccounts
+          .find(acc => acc.platform === 'facebook').userId ? 'outgoing' : 'incoming',
+        platformMessageId: msg.id,
+        createdAt: new Date(msg.created_time),
+        isRead: false
+      }))
+    );
+  }
+
+  // Placeholder for Instagram message methods
+  async _sendInstagramMessage(accessToken, recipientId, message, imageUrl) {
+    // Implement Instagram message sending logic
+    throw new Error('Instagram message sending not implemented');
+  }
+
+  async _syncInstagramMessages(accessToken) {
+    // Implement Instagram message syncing logic
+    throw new Error('Instagram message syncing not implemented');
+  }
+
+  // ========== فيسبوك ==========
+  async _publishToFacebook(post, platform) {
+    const { pageId } = platform;
+    const pageToken = await this._getPageAccessToken('facebook', pageId);
+    
+    // تحضير بيانات النشر
+    const postData = {
+      message: post.content,
+      access_token: pageToken
+    };
+
+    // إضافة الوسائط إذا وجدت
+    if (post.media && post.media.length > 0) {
+      if (post.media[0].type === 'video') {
+        // رفع فيديو
+        const videoResponse = await this._uploadFacebookVideo(pageId, pageToken, post.media[0].url);
+        postData.video_id = videoResponse.video_id;
+      } else {
+        // رفع صور
+        const photoIds = await Promise.all(
+          post.media
+            .filter(m => m.type === 'image')
+            .map(media => this._uploadFacebookPhoto(pageId, pageToken, media.url))
+        );
+        postData.attached_media = photoIds.map(id => ({ media_fbid: id }));
+      }
+    }
+
+    // النشر
+    const response = await axios.post(
+      `https://graph.facebook.com/v12.0/${pageId}/feed`,
+      postData
+    );
+
+    // حفظ معرف المنشور للرد على التعليقات
+    await Post.findByIdAndUpdate(post._id, {
+      'platforms.$[elem].postId': response.data.id
+    }, {
+      arrayFilters: [{ 'elem.platform': 'facebook' }],
+      new: true
+    });
+
+    return {
+      id: response.data.id,
+      url: `https://www.facebook.com/${response.data.id}`,
+      platform: 'facebook'
+    };
+  }
+
+  // رفع فيديو لفيسبوك
+  async _uploadFacebookVideo(pageId, accessToken, videoUrl) {
+    // بدء جلسة رفع
+    const uploadSession = await axios.post(
+      `https://graph-video.facebook.com/v12.0/${pageId}/videos`,
+      {
+        upload_phase: 'start',
+        file_size: (await axios.head(videoUrl)).headers['content-length'],
+        access_token: accessToken
+      }
+    );
+
+    // رفع الفيديو
+    await axios.post(uploadSession.data.upload_url, {
+      file: {
+        value: (await axios.get(videoUrl, { responseType: 'stream' })).data,
+        options: {
+          filename: 'video.mp4',
+          contentType: 'video/mp4'
+        }
+      }
+    });
+
+    // إنهاء الرفع
+    const finishResponse = await axios.post(
+      `https://graph-video.facebook.com/v12.0/${pageId}/videos`,
+      {
+        upload_phase: 'finish',
+        upload_session_id: uploadSession.data.upload_session_id,
+        access_token: accessToken
+      }
+    );
+
+    return { video_id: finishResponse.data.video_id };
+  }
+
+  // رفع صورة لفيسبوك
+  async _uploadFacebookPhoto(pageId, accessToken, imageUrl) {
+    const response = await axios.post(
+      `https://graph.facebook.com/v12.0/${pageId}/photos`,
+      {
+        url: imageUrl,
+        published: false,
+        access_token: accessToken
+      }
+    );
+    return response.data.id;
+  }
+
+  // ========== إنستغرام ==========
+  async _publishToInstagram(post, platform) {
+    const { pageId } = platform;
+    const pageToken = await this._getPageAccessToken('facebook', pageId);
+    
+    // الحصول على معرف إنستغرام المرتبط بالصفحة
+    const igUserResponse = await axios.get(
+      `https://graph.facebook.com/v12.0/${pageId}?fields=instagram_business_account&access_token=${pageToken}`
+    );
+    
+    const igUserId = igUserResponse.data.instagram_business_account.id;
+    
+    // تحضير بيانات النشر
+    let creationId;
+    
+    if (post.media && post.media.length > 0) {
+      if (post.media[0].type === 'video') {
+        // رفع فيديو لإنستغرام
+        const uploadResponse = await this._uploadInstagramVideo(igUserId, pageToken, post.media[0].url, post.content);
+        creationId = uploadResponse.id;
+      } else {
+        // رفع صورة/صور لإنستغرام
+        const mediaUrls = post.media.filter(m => m.type === 'image').map(m => m.url);
+        const uploadResponse = await this._uploadInstagramPhotos(igUserId, pageToken, mediaUrls, post.content);
+        creationId = uploadResponse.id;
+      }
+    } else {
+      // منشور نصي فقط
+      const response = await axios.post(
+        `https://graph.facebook.com/v12.0/${igUserId}/media`,
+        {
+          caption: post.content,
+          access_token: pageToken
+        }
+      );
+      creationId = response.data.id;
+    }
+
+    // النشر
+    const publishResponse = await axios.post(
+      `https://graph.facebook.com/v12.0/${igUserId}/media_publish`,
+      {
+        creation_id: creationId,
+        access_token: pageToken
+      }
+    );
+
+    // حفظ معرف المنشور
+    await Post.findByIdAndUpdate(post._id, {
+      'platforms.$[elem].postId': publishResponse.data.id,
+      'platforms.$[elem].igContainerId': creationId
+    }, {
+      arrayFilters: [{ 'elem.platform': 'instagram' }],
+      new: true
+    });
+
+    return {
+      id: publishResponse.data.id,
+      url: `https://www.instagram.com/p/${publishResponse.data.id}`,
+      platform: 'instagram'
+    };
+  }
+
+  // ========== تيك توك ==========
+  async _publishToTikTok(post, platform) {
+    const { accessToken } = this._getAccessToken('tiktok');
+    
+    // تحضير بيانات النشر
+    const tiktokData = {
+      post_info: {
+        title: post.title || 'New Post',
+        privacy_level: 'PUBLIC_TO_EVERYONE',
+        disable_comment: false,
+        disable_duet: false,
+        disable_stitch: false,
+        brand_content_toggle: false,
+        brand_organic_toggle: false,
+        video_cover_timestamp_ms: 0
+      },
+      source_info: {
+        source: 'PULL_FROM_URL',
+        video_url: post.media[0].url
+      }
+    };
+
+    // النشر
+    const response = await axios.post(
+      'https://open-api.tiktok.com/share/video/upload/',
+      tiktokData,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    // حفظ معرف المنشور
+    await Post.findByIdAndUpdate(post._id, {
+      'platforms.$[elem].postId': response.data.share_id,
+      'platforms.$[elem].status': 'published'
+    }, {
+      arrayFilters: [{ 'elem.platform': 'tiktok' }],
+      new: true
+    });
+
+    return {
+      id: response.data.share_id,
+      url: `https://www.tiktok.com/@${response.data.share_user_name}/video/${response.data.share_id}`,
+      platform: 'tiktok'
+    };
+  }
+
+  // ========== أدوات مساعدة ==========
+  async _getPageAccessToken(platform, pageId) {
+    const account = this.user.socialMediaAccounts.find(
+      acc => acc.platform === platform && acc.pages.some(p => p.id === pageId)
+    );
+    
+    if (!account) {
+      throw new AppError(`لم يتم العثور على حساب ${platform}`, 404);
+    }
+    
+    const page = account.pages.find(p => p.id === pageId);
+    return page.accessToken;
+  }
+
+  // ========== الرد التلقائي على التعليقات ==========
+  async setupAutoReply(platform, postId, replyTemplate) {
+    switch (platform) {
+      case 'facebook':
+      case 'instagram':
+        return this._setupFbIgAutoReply(platform, postId, replyTemplate);
+      case 'tiktok':
+        return this._setupTikTokAutoReply(postId, replyTemplate);
+      default:
+        throw new AppError('المنصة غير مدعومة للرد التلقائي', 400);
+    }
+  }
+
+  async _setupFbIgAutoReply(platform, postId, replyTemplate) {
+    const post = await Post.findOne({ 'platforms.postId': postId });
+    if (!post) {
+      throw new AppError('المنشور غير موجود', 404);
+    }
+
+    // حفظ قالب الرد
+    post.autoReplyTemplate = replyTemplate;
+    await post.save();
+
+    // الاشتراك في تنبيهات التعليقات الجديدة (ويب هوك)
+    const pageId = post.platforms.find(p => p.platform === platform)?.pageId;
+    if (!pageId) {
+      throw new AppError('معرف الصفحة غير موجود', 404);
+    }
+
+    const pageToken = await this._getPageAccessToken('facebook', pageId);
+    
+    await axios.post(
+      `https://graph.facebook.com/v12.0/${pageId}/subscribed_apps`,
+      {
+        subscribed_fields: 'feed',
+        access_token: pageToken
+      }
+    );
+
+    return { success: true, message: 'تم تفعيل الرد التلقائي بنجاح' };
+  }
+
+  // معالجة التعليقات الواردة (يتم استدعاؤها من ويب هوك)
+  async handleNewComment(platform, commentData) {
+    const { postId, commentId, from, message } = commentData;
+    
+    // البحث عن المنشور وقالب الرد
+    const post = await Post.findOne({ 'platforms.postId': postId });
+    if (!post?.autoReplyTemplate) return;
+
+    // إنشاء الرد
+    let reply = post.autoReplyTemplate
+      .replace('{user}', from.name)
+      .replace('{comment}', message);
+
+    // إرسال الرد
+    switch (platform) {
+      case 'facebook':
+      case 'instagram':
+        await this._replyToFbIgComment(platform, commentId, reply);
+        break;
+      case 'tiktok':
+        await this._replyToTikTokComment(commentId, reply);
+        break;
+    }
+
+    // حفظ التعليق والرد في قاعدة البيانات
+    await Comment.create({
+      post: post._id,
+      platform,
+      platformCommentId: commentId,
+      author: from,
+      content: message,
+      reply: {
+        content: reply,
+        status: 'sent'
+      }
+    });
+  }
+
+  // ========== إدارة الرسائل المباشرة ==========
+  async sendDirectMessage(platform, recipientId, message, productId = null) {
+    let messageContent = message;
+    
+    // إضافة تفاصيل المنتج إذا كان متوفراً
+    if (productId) {
+      const product = await Product.findById(productId);
+      if (product) {
+        messageContent += `\n\n🛍️ ${product.name}`;
+        messageContent += `\n💰 السعر: ${product.price} ${product.currency}`;
+        if (product.description) {
+          messageContent += `\n📝 ${product.description.substring(0, 100)}...`;
+        }
+        if (product.images?.length > 0) {
+          // إرسال الصورة الأولى للمنتج
+          await this._sendMediaMessage(platform, recipientId, product.images[0]);
+        }
+      }
+    }
+
+    // إرسال الرسالة النصية
+    switch (platform) {
+      case 'facebook':
+      case 'instagram':
+        return this._sendFbIgMessage(platform, recipientId, messageContent);
+      case 'tiktok':
+        return this._sendTikTokMessage(recipientId, messageContent);
+      default:
+        throw new AppError('المنصة غير مدعومة للرسائل المباشرة', 400);
+    }
+  }
+
+  // ========== أدوات داخلية ==========
+  _getAccessToken(platform) {
+    const account = this.user.socialMediaAccounts.find(acc => acc.platform === platform);
+    if (!account || !account.accessToken) {
+      throw new AppError(`لم يتم ربط حساب ${platform}`, 400);
+    }
+    
+    // التحقق من انتهاء صلاحية الرمز وتجديده إذا لزم الأمر
+    if (account.tokenExpiry && account.tokenExpiry < new Date()) {
+      return this._refreshToken(platform, account);
+    }
+    
+    return {
+      accessToken: account.accessToken,
+      userId: account.userId
+    };
+  }
+  
+  async _refreshToken(platform, account) {
+    // تنفيذ تجديد الرمز المميز حسب المنصة
+    // ...
+  }
+    
+    // Prepare post data for Facebook
+    const postData = {
+      message: post.content,
+      access_token: accessToken
+    };
+    
+    // Add images if available
+    if (post.images && post.images.length > 0) {
+      // For multiple images, you might need to create an album first
+      // This is a simplified version for single image
+      postData.url = post.images[0];
+      
+      const response = await axios.post(
+        'https://graph.facebook.com/v12.0/me/photos',
+        postData
+      );
+      
+      return {
+        id: response.data.id,
+        url: `https://www.facebook.com/photo.php?fbid=${response.data.id}`
+      };
+    } else {
+      // For text-only post
+      const response = await axios.post(
+        'https://graph.facebook.com/v12.0/me/feed',
+        postData
+      );
+      
+      return {
+        id: response.data.id,
+        url: `https://www.facebook.com/${response.data.id}`
+      };
+    }
+  }
+
+  async _publishToInstagram(post, platform) {
+    // Instagram Graph API requires a business account
+    // and pre-validation of the image URL
+    const accessToken = this._getAccessToken('instagram');
+    
+    // This is a simplified example
+    // In a real app, you would need to:
+    // 1. Upload the image to Instagram's container
+    // 2. Wait for the container to be processed
+    // 3. Publish the container
+    
+    const response = await axios.post(
+      'https://graph.facebook.com/v12.0/17841400000000000/media',
+      {
+        image_url: post.images[0],
+        caption: post.content,
+        access_token: accessToken
+      }
+    );
+    
+    const creationId = response.data.id;
+    
+    // Publish the container
+    const publishResponse = await axios.post(
+      'https://graph.facebook.com/v12.0/17841400000000000/media_publish',
+      {
+        creation_id: creationId,
+        access_token: accessToken
+      }
+    );
+    
+    return {
+      id: publishResponse.data.id,
+      url: `https://www.instagram.com/p/${publishResponse.data.id}/`
+    };
+  }
+
+  async _publishToTikTok(post, platform) {
+    // TikTok API requires OAuth 2.0 and additional setup
+    // This is a placeholder implementation
+    throw new Error('TikTok integration not implemented');
+  }
+
+  async _publishToTwitter(post, platform) {
+    // Twitter API v2 requires OAuth 1.0a or 2.0
+    // This is a placeholder implementation
+    throw new Error('Twitter (X) integration not implemented');
+  }
+
+  async _updateOnPlatform(platformName, postId, post) {
+    // Implementation for updating a post on a specific platform
+    // This would be similar to the publish methods but with an update endpoint
+    throw new Error(`Update not implemented for ${platformName}`);
+  }
+
+  async _deleteFromPlatform(platformName, postId) {
+    // Implementation for deleting a post from a specific platform
+    // This would use the platform's delete endpoint
+    throw new Error(`Delete not implemented for ${platformName}`);
+  }
+
+  async _getAnalyticsFromPlatform(platformName, postId) {
+    // Implementation for getting analytics from a specific platform
+    // This would use the platform's analytics endpoint
+    throw new Error(`Analytics not implemented for ${platformName}`);
+  }
+
+  _getAccessToken(platform) {
+    // Get the access token for the specified platform from user's social accounts
+    const account = this.user.socialMediaAccounts.find(acc => acc.platform === platform);
+    
+    if (!account || !account.accessToken) {
+      throw new AppError(`No ${platform} account connected`, 400);
+    }
+    
+    return account.accessToken;
+  }
+}
+
+module.exports = SocialMediaService;
