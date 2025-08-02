@@ -1,5 +1,5 @@
 const express = require("express");
-const { protect } = require("../controllers/auth.controller");
+const { protect } = require("../controllers/auth.Controller.js");
 const {
   createPost,
   getPosts,
@@ -7,7 +7,7 @@ const {
   updatePost,
   deletePost,
   publishPost,
-} = require("../controllers/post.controller");
+} = require("../controllers/post.controller.js");
 
 const { requireActiveSubscription, requirePackageService } = require("../middleware/subscriptionMiddleware");
 const router = express.Router();

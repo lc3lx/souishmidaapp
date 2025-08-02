@@ -1,11 +1,11 @@
 const express = require("express");
-const { protect } = require("../controllers/auth.controller");
+const { protect } = require("../controllers/auth.Controller");
 const packageController = require("../controllers/packageController");
 
 const router = express.Router();
 
 // Public: Get all packages, get single package
-router.get("/", packageController.getAllPackages);
+router.get("/", packageController.getAllPackages);  
 router.get("/:id", packageController.getPackage);
 
 // Admin: Create, update, delete package
